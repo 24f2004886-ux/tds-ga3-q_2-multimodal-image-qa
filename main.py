@@ -1,6 +1,7 @@
 import base64
 import sys
 import os
+import traceback
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,15 +28,9 @@ async def answer_image(payload: QAData):
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
 
-        # Clean string spaces or newlines that can break HTTP transfer
         base64_str = base64_str.strip().replace("\n", "").replace("\r", "")
 
-        # Re-verify correct padding format
-        base64_str += "=" * ((4 - len(base64_str) % 4) % 4)
-
-        # Build standard data URI string
-        image_url_data = f"data:image/png;base64,{base64_str}"
-
+        # Build strict system instruction rule
         system_instruction = (
             "You are a strict data extraction bot. Answer the question using ONLY the provided image. "
             "Rule: If the answer is a numeric value, return ONLY the raw number as a string. "
@@ -49,47 +44,44 @@ async def answer_image(payload: QAData):
             "Content-Type": "application/json"
         }
 
-        # Structuring multimodal payload for OpenRouter spec via AI Pipe
+        # Native Gemini layout for AI Pipe proxy endpoint
         json_data = {
-            "model": "google/gemini-2.5-flash",
-            "messages": [
+            "contents": [
                 {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"{system_instruction}\n\nQuestion: {payload.question}"},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url_data
-                            }
-                        }
+                    "parts": [
+                        {"inlineData": {"mimeType": "image/png", "data": base64_str}},
+                        {"text": f"{system_instruction}\n\nQuestion: {payload.question}"}
                     ]
                 }
             ],
-            "temperature": 0.0
+            "generationConfig": {
+                "temperature": 0.0
+            }
         }
 
         async with httpx.AsyncClient() as client:
+            # We are using the native Gemini proxy routing on aipipe for maximum consistency
             response = await client.post(
-                "https://aipipe.org/openrouter/v1/chat/completions",
+                "https://aipipe.org/geminiv1beta/models/gemini-2.5-flash:generateContent",
                 headers=headers,
                 json=json_data,
                 timeout=45.0
             )
 
+            # Print status immediately to logs
+            print(f"DIAGNOSTIC - Upstream Status: {response.status_code}", file=sys.stderr)
+
             if response.status_code != 200:
-                print(f"AI Pipe Error Response: {response.text}", file=sys.stderr)
-                raise HTTPException(status_code=500, detail=f"Upstream API failure: {response.text}")
+                print(f"DIAGNOSTIC - Upstream Error Body: {response.text}", file=sys.stderr)
+                raise HTTPException(status_code=500, detail=f"AI Pipe Upstream Error: {response.text}")
 
             result = response.json()
-
-            if "choices" not in result or not result["choices"]:
-                print(f"Unexpected JSON format from API: {result}", file=sys.stderr)
-                raise HTTPException(status_code=500, detail="Empty response structure from AI model.")
-
-            answer = result["choices"][0]["message"]["content"].strip()
+            answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
             return {"answer": answer}
 
     except Exception as e:
-        print(f"CRITICAL API EXCEPTION: {str(e)}", file=sys.stderr)
+        # CRITICAL: This extracts the actual line number and full error context to your Render Logs tab
+        print("======== CRITICAL CODE EXCEPTION BREAKDOWN ========", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        print("===================================================", file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
