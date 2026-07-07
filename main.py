@@ -8,7 +8,7 @@ from google.genai import types
 
 app = FastAPI()
 
-# Enable CORS
+# Enable CORS (Required so the Cloudflare Worker grader can connect)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,25 +17,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Automatically loads GEMINI_API_KEY from Render's Environment Variables
+# Automatically pulls the GEMINI_API_KEY from your Render Environment Variables
 client = genai.Client()
 
+# This schema exactly matches the spec from your q-multimodal-image-qa-server_sample.json
 class QAData(BaseModel):
     image_base64: str
     question: str
 
 @app.post("/answer-image")
-async def answer_image(data: QAData):  # Re-added 'async' to support multi-concurrency grading requests
+async def answer_image(payload: QAData): # Changed from 'data' to 'payload' to fix the internal 500 error
     try:
-        base64_str = data.image_base64
+        base64_str = payload.image_base64
+
+        # Clean data URI prefix if present
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
 
-        # Automatically fix any string padding issues if the grader truncates trailing '=' signs
+        # Fix any potential base64 padding issues automatically
         base64_str += "=" * ((4 - len(base64_str) % 4) % 4)
         image_bytes = base64.b64decode(base64_str)
 
-        # Dynamically detect image type from its raw file signature header
+        # Dynamically determine the MIME type based on raw image bytes
         mime_type = "image/png"
         if image_bytes.startswith(b"\xff\xd8"):
             mime_type = "image/jpeg"
@@ -49,25 +52,29 @@ async def answer_image(data: QAData):  # Re-added 'async' to support multi-concu
             mime_type=mime_type,
         )
 
+        # Enforce strict assignment formatting rules
         system_instruction = (
-            "You are a strict data extraction bot. Answer the question using ONLY the provided image. "
-            "Rule: If the answer is a numeric value, return ONLY the raw number as a string. "
-            "Do not include currency symbols, commas, units, letters, or extra spaces. "
+            "You are a precise data extraction assistant. "
+            "Answer the question using ONLY the provided image. "
+            "If the answer is a number, return ONLY the raw numeric value as a string. "
+            "Do not include currency symbols ($), commas, spaces, or units (kg, items). "
             "Example: If the total is $4,089.35, reply exactly: 4089.35"
         )
 
+        # Call the multimodal Gemini model
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[image_part, data.question],
+            contents=[image_part, payload.question],
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.0
+                temperature=0.0 # Lowest randomness for strict factual extraction
             )
         )
 
+        # Return the response structure exactly required by the spec: {"answer": "..."}
         return {"answer": response.text.strip()}
 
     except Exception as e:
-        # In case anything fails, this prints the exact traceback directly to your Render Logs tab
-        print(f"CRITICAL API ERROR: {str(e)}", file=sys.stderr)
+        # Logs errors explicitly into the Render dashboard text console
+        print(f"CRITICAL ERROR ENCOUNTERED: {str(e)}", file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
