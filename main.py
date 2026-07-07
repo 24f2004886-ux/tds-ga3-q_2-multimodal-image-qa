@@ -1,73 +1,73 @@
 import base64
-import sys
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
+# 1. Initialize the FastAPI app
 app = FastAPI()
 
+# 2. Enable CORS (Required so the assignment grader can connect)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allows any origin
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allows all methods (POST, GET, etc.)
+    allow_headers=["*"],  # Allows all headers
 )
 
-client = genai.Client()
+# 3. Securely load your Gemini API Key
+# Make sure to set this environment variable, or paste your key string directly for local testing:
+# client = genai.Client(api_key="YOUR_ACTUAL_API_KEY")
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-class QA_Request(BaseModel):
+# 4. Define what incoming data should look like
+class QAData(BaseModel):
     image_base64: str
     question: str
 
+# 5. Create the required assignment endpoint
 @app.post("/answer-image")
-async def answer_image(payload: QA_Request):
+def answer_image(data: QAData):
     try:
-        b64_string = payload.image_base64
-        if "," in b64_string:
-            b64_string = b64_string.split(",")[1]
+        # Clean the base64 string if it contains metadata prefixes
+        base64_str = data.image_base64
+        if "," in base64_str:
+            base64_str = base64_str.split(",")[1]
 
-        # Fix any potential base64 padding issues automatically
-        b64_string += "=" * ((4 - len(b64_string) % 4) % 4)
-        image_bytes = base64.b64decode(b64_string)
+        # Decode the text string back into raw image bytes
+        image_bytes = base64.b64decode(base64_str)
 
-        # Dynamically determine if the image is PNG or JPEG based on magic numbers
-        mime_type = "image/png"
-        if image_bytes.startswith(b"\xff\xd8"):
-            mime_type = "image/jpeg"
-        elif image_bytes.startswith(b"\x89PNG"):
-            mime_type = "image/png"
-        elif image_bytes.startswith(b"GIF8"):
-            mime_type = "image/gif"
-
+        # Prepare the image for Gemini
         image_part = types.Part.from_bytes(
             data=image_bytes,
-            mime_type=mime_type
+            mime_type="image/png",  # Adjust if handling purely JPEGs
         )
 
+        # Enforce the assignment formatting rule using a system prompt
         system_instruction = (
-            "You are a strict data extraction bot. Answer the question using ONLY the provided image. "
-            "Rule: If the answer is a numeric value, return ONLY the raw number as a string. "
-            "Do not include currency symbols, commas, units, letters, or extra spaces. "
-            "Example: If the total is $4,089.35, reply exactly: 4089.35"
+            "You are a precise data extraction assistant. "
+            "If the answer is a number, return ONLY the raw numeric value. "
+            "Do not include currency symbols ($), commas, or units (kg, items). "
+            "Keep answers as brief and direct as possible."
         )
 
+        # Call the multimodal Gemini model
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[image_part, payload.question],
+            contents=[image_part, data.question],
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.0
+                temperature=0.1 # Low temperature ensures strict factual extraction
             )
         )
 
-        final_answer = response.text.strip()
-        return {"answer": final_answer}
+        # Return the response exactly as required by the spec
+        return {"answer": response.text.strip()}
 
     except Exception as e:
-        # CRITICAL: This prints the exact error back into your Render logs
-        print(r"--- ERROR ENCOUNTERED ---", file=sys.stderr)
-        print(str(e), file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
+
+# Run locally using: uvicorn main:app --reload
