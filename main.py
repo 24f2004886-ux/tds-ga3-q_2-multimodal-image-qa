@@ -29,8 +29,8 @@ async def answer_image(payload: QAData):
             base64_str = base64_str.split(",")[1]
 
         base64_str = base64_str.strip().replace("\n", "").replace("\r", "")
+        image_url_data = f"data:image/png;base64,{base64_str}"
 
-        # Build strict system instruction rule
         system_instruction = (
             "You are a strict data extraction bot. Answer the question using ONLY the provided image. "
             "Rule: If the answer is a numeric value, return ONLY the raw number as a string. "
@@ -44,31 +44,33 @@ async def answer_image(payload: QAData):
             "Content-Type": "application/json"
         }
 
-        # Native Gemini layout for AI Pipe proxy endpoint
+        # Structured format for OpenRouter endpoints via AI Pipe
         json_data = {
-            "contents": [
+            "model": "google/gemini-2.5-flash",
+            "messages": [
                 {
-                    "parts": [
-                        {"inlineData": {"mimeType": "image/png", "data": base64_str}},
-                        {"text": f"{system_instruction}\n\nQuestion: {payload.question}"}
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"{system_instruction}\n\nQuestion: {payload.question}"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_url_data}
+                        }
                     ]
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.0
-            }
+            "temperature": 0.0
         }
 
         async with httpx.AsyncClient() as client:
-            # We are using the native Gemini proxy routing on aipipe for maximum consistency
+            # Reverting back to the standard OpenRouter authentication endpoint route
             response = await client.post(
-                "https://aipipe.org/geminiv1beta/models/gemini-2.5-flash:generateContent",
+                "https://aipipe.org/openrouter/v1/chat/completions",
                 headers=headers,
                 json=json_data,
                 timeout=45.0
             )
 
-            # Print status immediately to logs
             print(f"DIAGNOSTIC - Upstream Status: {response.status_code}", file=sys.stderr)
 
             if response.status_code != 200:
@@ -76,11 +78,10 @@ async def answer_image(payload: QAData):
                 raise HTTPException(status_code=500, detail=f"AI Pipe Upstream Error: {response.text}")
 
             result = response.json()
-            answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            answer = result["choices"][0]["message"]["content"].strip()
             return {"answer": answer}
 
     except Exception as e:
-        # CRITICAL: This extracts the actual line number and full error context to your Render Logs tab
         print("======== CRITICAL CODE EXCEPTION BREAKDOWN ========", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         print("===================================================", file=sys.stderr)
