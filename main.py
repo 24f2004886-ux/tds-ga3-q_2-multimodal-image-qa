@@ -1,73 +1,73 @@
 import base64
-import os
+import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
-# 1. Initialize the FastAPI app
 app = FastAPI()
 
-# 2. Enable CORS (Required so the assignment grader can connect)
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows any origin
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (POST, GET, etc.)
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# 3. Securely load your Gemini API Key
-# Make sure to set this environment variable, or paste your key string directly for local testing:
-# client = genai.Client(api_key="YOUR_ACTUAL_API_KEY")
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Automatically loads GEMINI_API_KEY from Render's Environment Variables
+client = genai.Client()
 
-# 4. Define what incoming data should look like
 class QAData(BaseModel):
     image_base64: str
     question: str
 
-# 5. Create the required assignment endpoint
 @app.post("/answer-image")
-def answer_image(data: QAData):
+async def answer_image(data: QAData):  # Re-added 'async' to support multi-concurrency grading requests
     try:
-        # Clean the base64 string if it contains metadata prefixes
         base64_str = data.image_base64
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
 
-        # Decode the text string back into raw image bytes
+        # Automatically fix any string padding issues if the grader truncates trailing '=' signs
+        base64_str += "=" * ((4 - len(base64_str) % 4) % 4)
         image_bytes = base64.b64decode(base64_str)
 
-        # Prepare the image for Gemini
+        # Dynamically detect image type from its raw file signature header
+        mime_type = "image/png"
+        if image_bytes.startswith(b"\xff\xd8"):
+            mime_type = "image/jpeg"
+        elif image_bytes.startswith(b"\x89PNG"):
+            mime_type = "image/png"
+        elif image_bytes.startswith(b"GIF8"):
+            mime_type = "image/gif"
+
         image_part = types.Part.from_bytes(
             data=image_bytes,
-            mime_type="image/png",  # Adjust if handling purely JPEGs
+            mime_type=mime_type,
         )
 
-        # Enforce the assignment formatting rule using a system prompt
         system_instruction = (
-            "You are a precise data extraction assistant. "
-            "If the answer is a number, return ONLY the raw numeric value. "
-            "Do not include currency symbols ($), commas, or units (kg, items). "
-            "Keep answers as brief and direct as possible."
+            "You are a strict data extraction bot. Answer the question using ONLY the provided image. "
+            "Rule: If the answer is a numeric value, return ONLY the raw number as a string. "
+            "Do not include currency symbols, commas, units, letters, or extra spaces. "
+            "Example: If the total is $4,089.35, reply exactly: 4089.35"
         )
 
-        # Call the multimodal Gemini model
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[image_part, data.question],
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.1 # Low temperature ensures strict factual extraction
+                temperature=0.0
             )
         )
 
-        # Return the response exactly as required by the spec
         return {"answer": response.text.strip()}
 
     except Exception as e:
+        # In case anything fails, this prints the exact traceback directly to your Render Logs tab
+        print(f"CRITICAL API ERROR: {str(e)}", file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
-
-# Run locally using: uvicorn main:app --reload
