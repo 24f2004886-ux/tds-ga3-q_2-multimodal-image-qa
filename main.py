@@ -24,12 +24,23 @@ class QAData(BaseModel):
 @app.post("/answer-image")
 async def answer_image(payload: QAData):
     try:
+        # 1. Clean up incoming base64 payload string
         base64_str = payload.image_base64
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
 
         base64_str = base64_str.strip().replace("\n", "").replace("\r", "")
         image_url_data = f"data:image/png;base64,{base64_str}"
+
+        # 2. Extract and strictly sanitize the token string
+        raw_token = os.getenv("GEMINI_API_KEY", "")
+
+        # Strip trailing newlines, spaces, and clean any outer quote symbols
+        clean_token = raw_token.strip().strip('"').strip("'")
+
+        # Diagnostic print to check string sizes safely without exposing the secret
+        print(f"DIAGNOSTIC - Token length loaded: {len(clean_token)}", file=sys.stderr)
+        print(f"DIAGNOSTIC - Token starts with: {clean_token[:10]}...", file=sys.stderr)
 
         system_instruction = (
             "You are a strict data extraction bot. Answer the question using ONLY the provided image. "
@@ -38,13 +49,11 @@ async def answer_image(payload: QAData):
             "Example: If the total is $4,089.35, reply exactly: 4089.35"
         )
 
-        token = os.getenv("GEMINI_API_KEY")
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {clean_token}",
             "Content-Type": "application/json"
         }
 
-        # Structured format for OpenRouter endpoints via AI Pipe
         json_data = {
             "model": "google/gemini-2.5-flash",
             "messages": [
@@ -63,7 +72,6 @@ async def answer_image(payload: QAData):
         }
 
         async with httpx.AsyncClient() as client:
-            # Reverting back to the standard OpenRouter authentication endpoint route
             response = await client.post(
                 "https://aipipe.org/openrouter/v1/chat/completions",
                 headers=headers,
@@ -71,11 +79,11 @@ async def answer_image(payload: QAData):
                 timeout=45.0
             )
 
-            print(f"DIAGNOSTIC - Upstream Status: {response.status_code}", file=sys.stderr)
+            print(f"DIAGNOSTIC - Upstream Status Code: {response.status_code}", file=sys.stderr)
 
             if response.status_code != 200:
-                print(f"DIAGNOSTIC - Upstream Error Body: {response.text}", file=sys.stderr)
-                raise HTTPException(status_code=500, detail=f"AI Pipe Upstream Error: {response.text}")
+                print(f"DIAGNOSTIC - Failure Body: {response.text}", file=sys.stderr)
+                raise HTTPException(status_code=500, detail=f"AI Pipe Error: {response.text}")
 
             result = response.json()
             answer = result["choices"][0]["message"]["content"].strip()
